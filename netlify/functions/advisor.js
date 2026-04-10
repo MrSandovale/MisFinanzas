@@ -1,5 +1,4 @@
 export default async (req) => {
-  // Only allow POST
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), {
       status: 405,
@@ -7,49 +6,67 @@ export default async (req) => {
     });
   }
 
-  const ANTHROPIC_API_KEY = Netlify.env.get("ANTHROPIC_API_KEY");
+  const GEMINI_API_KEY = Netlify.env.get("GEMINI_API_KEY");
 
-  if (!ANTHROPIC_API_KEY) {
+  if (!GEMINI_API_KEY) {
     return new Response(
-      JSON.stringify({ error: "API key not configured" }),
-      {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      }
+      JSON.stringify({ error: "GEMINI_API_KEY not configured" }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
 
   try {
     const body = await req.json();
+    const systemPrompt = body.system || "";
+    const messages = body.messages || [];
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: body.model || "claude-sonnet-4-20250514",
-        max_tokens: body.max_tokens || 1000,
-        system: body.system || "",
-        messages: body.messages || [],
-      }),
-    });
+    // Convert messages to Gemini format
+    const contents = messages.map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    }));
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system_instruction: {
+            parts: [{ text: systemPrompt }],
+          },
+          contents,
+          generationConfig: {
+            maxOutputTokens: 1024,
+            temperature: 0.7,
+          },
+        }),
+      }
+    );
 
     const data = await response.json();
 
-    return new Response(JSON.stringify(data), {
-      status: response.status,
-      headers: { "Content-Type": "application/json" },
-    });
+    if (data.error) {
+      return new Response(
+        JSON.stringify({ error: data.error.message }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Extract text from Gemini response
+    const text =
+      data.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ||
+      "No pude procesar tu consulta.";
+
+    // Return in a simple format our frontend expects
+    return new Response(
+      JSON.stringify({ content: [{ type: "text", text }] }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
   } catch (error) {
     return new Response(
       JSON.stringify({ error: "Failed to connect to AI service" }),
-      {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      }
+      { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
 };
