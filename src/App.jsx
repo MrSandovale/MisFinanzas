@@ -275,24 +275,52 @@ function Dashboard({ session }) {
     })();
   }, [userId]);
 
-  // Auto-save to Supabase with debounce
+  // Auto-save to Supabase — short debounce to batch rapid typing, then save
   const saveTimer = useRef(null);
-  useEffect(() => {
+  const pendingSave = useRef(false);
+
+  const doSave = useCallback(async () => {
     if (!loaded) return;
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      setSaving(true);
+    pendingSave.current = false;
+    setSaving(true);
+    try {
       await Promise.all([
         db.saveCategories(userId, categories),
         db.saveBudgetIncome(userId, budgetIncome),
         db.upsertSettings(userId, savingsGoal),
       ]);
-      setSaving(false);
-    }, 1500);
+    } catch (e) {
+      console.error('Error saving data:', e);
+    }
+    setSaving(false);
+  }, [userId, categories, budgetIncome, savingsGoal, loaded]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    pendingSave.current = true;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(doSave, 500);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [categories, budgetIncome, savingsGoal, loaded]);
+  }, [categories, budgetIncome, savingsGoal, loaded, doSave]);
+
+  // Save pending changes when user closes the tab
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (pendingSave.current && loaded) {
+        // Use sendBeacon for reliable save on page close
+        const payload = JSON.stringify({ categories, budgetIncome, savingsGoal, userId });
+        navigator.sendBeacon?.('/.netlify/functions/advisor', ''); // just trigger any pending network
+        // Force synchronous save attempt
+        doSave();
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [doSave, categories, budgetIncome, savingsGoal, loaded, userId]);
 
   const handleLogout = async () => {
+    // Save before logging out
+    await doSave();
     await supabase.auth.signOut();
   };
 

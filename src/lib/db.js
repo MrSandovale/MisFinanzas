@@ -13,64 +13,134 @@ export async function loadSettings(userId) {
 export async function upsertSettings(userId, savingsGoal) {
   const { data, error } = await supabase
     .from('user_settings')
-    .upsert({ user_id: userId, savings_goal: savingsGoal, updated_at: new Date().toISOString() }, { onConflict: 'user_id' })
+    .upsert(
+      { user_id: userId, savings_goal: savingsGoal, updated_at: new Date().toISOString() },
+      { onConflict: 'user_id' }
+    )
     .select()
     .single();
+  if (error) console.error('Error saving settings:', error);
   return { data, error };
 }
 
 // ── CATEGORIES ──
 export async function loadCategories(userId) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('categories')
     .select('*')
     .eq('user_id', userId)
     .order('sort_order');
+  if (error) console.error('Error loading categories:', error);
   return data || [];
 }
 
 export async function saveCategories(userId, categories) {
-  // Delete existing and re-insert (simplest approach for full array sync)
-  await supabase.from('categories').delete().eq('user_id', userId);
-  if (categories.length === 0) return;
-  const rows = categories.map((c, i) => ({
-    user_id: userId,
-    name: c.name,
-    type: c.type,
-    essential: c.essential,
-    group: c.group,
-    budget: c.budget || 0,
-    sort_order: i,
-  }));
-  await supabase.from('categories').insert(rows);
+  if (!categories || categories.length === 0) return;
+
+  // Get existing categories
+  const { data: existing } = await supabase
+    .from('categories')
+    .select('id, name')
+    .eq('user_id', userId);
+
+  const existingMap = {};
+  (existing || []).forEach(e => { existingMap[e.name] = e.id; });
+
+  // Upsert each category (update if exists, insert if new)
+  for (let i = 0; i < categories.length; i++) {
+    const c = categories[i];
+    if (existingMap[c.name]) {
+      await supabase
+        .from('categories')
+        .update({
+          type: c.type,
+          essential: c.essential,
+          group: c.group,
+          budget: c.budget || 0,
+          sort_order: i,
+        })
+        .eq('id', existingMap[c.name])
+        .eq('user_id', userId);
+      delete existingMap[c.name];
+    } else {
+      await supabase.from('categories').insert({
+        user_id: userId,
+        name: c.name,
+        type: c.type,
+        essential: c.essential,
+        group: c.group,
+        budget: c.budget || 0,
+        sort_order: i,
+      });
+    }
+  }
+
+  // Delete categories that were removed by the user
+  const orphanIds = Object.values(existingMap);
+  if (orphanIds.length > 0) {
+    await supabase
+      .from('categories')
+      .delete()
+      .in('id', orphanIds)
+      .eq('user_id', userId);
+  }
 }
 
 // ── BUDGET INCOME ──
 export async function loadBudgetIncome(userId) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('budget_income')
     .select('*')
     .eq('user_id', userId);
+  if (error) console.error('Error loading budget income:', error);
   return (data || []).map(r => ({ category: r.category, amount: Number(r.amount) }));
 }
 
 export async function saveBudgetIncome(userId, incomes) {
-  await supabase.from('budget_income').delete().eq('user_id', userId);
-  if (incomes.length === 0) return;
-  const rows = incomes.map(i => ({
-    user_id: userId,
-    category: i.category,
-    amount: i.amount || 0,
-  }));
-  await supabase.from('budget_income').insert(rows);
+  if (!incomes || incomes.length === 0) return;
+
+  const { data: existing } = await supabase
+    .from('budget_income')
+    .select('id, category')
+    .eq('user_id', userId);
+
+  const existingMap = {};
+  (existing || []).forEach(e => { existingMap[e.category] = e.id; });
+
+  for (const inc of incomes) {
+    if (existingMap[inc.category]) {
+      await supabase
+        .from('budget_income')
+        .update({ amount: inc.amount || 0 })
+        .eq('id', existingMap[inc.category])
+        .eq('user_id', userId);
+      delete existingMap[inc.category];
+    } else {
+      await supabase.from('budget_income').insert({
+        user_id: userId,
+        category: inc.category,
+        amount: inc.amount || 0,
+      });
+    }
+  }
+
+  const orphanIds = Object.values(existingMap);
+  if (orphanIds.length > 0) {
+    await supabase
+      .from('budget_income')
+      .delete()
+      .in('id', orphanIds)
+      .eq('user_id', userId);
+  }
 }
 
 // ── BUDGET OVERRIDES ──
 export async function loadBudgetOverrides(userId) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('budget_overrides')
     .select('*')
     .eq('user_id', userId);
+  if (error) console.error('Error loading budget overrides:', error);
   const map = {};
   (data || []).forEach(r => {
     map[`${r.month}:${r.category_name}`] = Number(r.amount);
@@ -79,7 +149,7 @@ export async function loadBudgetOverrides(userId) {
 }
 
 export async function upsertBudgetOverride(userId, month, categoryName, amount) {
-  await supabase
+  const { error } = await supabase
     .from('budget_overrides')
     .upsert({
       user_id: userId,
@@ -87,15 +157,17 @@ export async function upsertBudgetOverride(userId, month, categoryName, amount) 
       category_name: categoryName,
       amount,
     }, { onConflict: 'user_id,month,category_name' });
+  if (error) console.error('Error saving budget override:', error);
 }
 
 // ── TRANSACTIONS ──
 export async function loadTransactions(userId) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('transactions')
     .select('*')
     .eq('user_id', userId)
     .order('date', { ascending: false });
+  if (error) console.error('Error loading transactions:', error);
   return (data || []).map(r => ({
     id: r.id,
     date: r.date,
@@ -121,11 +193,12 @@ export async function addTransaction(userId, txn) {
     })
     .select()
     .single();
+  if (error) console.error('Error adding transaction:', error);
   return { data: data ? { ...txn, id: data.id } : null, error };
 }
 
 export async function updateTransaction(userId, txn) {
-  await supabase
+  const { error } = await supabase
     .from('transactions')
     .update({
       date: txn.date,
@@ -137,14 +210,16 @@ export async function updateTransaction(userId, txn) {
     })
     .eq('id', txn.id)
     .eq('user_id', userId);
+  if (error) console.error('Error updating transaction:', error);
 }
 
 export async function deleteTransaction(userId, txnId) {
-  await supabase
+  const { error } = await supabase
     .from('transactions')
     .delete()
     .eq('id', txnId)
     .eq('user_id', userId);
+  if (error) console.error('Error deleting transaction:', error);
 }
 
 // ── LOAD ALL DATA ──
@@ -171,12 +246,30 @@ export async function loadAllData(userId) {
   };
 }
 
-// ── SEED DEFAULT CATEGORIES ──
+// ── SEED DEFAULT CATEGORIES (only if truly empty) ──
 export async function seedDefaults(userId, defaultCategories) {
-  const existing = await loadCategories(userId);
-  if (existing.length === 0) {
-    await saveCategories(userId, defaultCategories);
-    await saveBudgetIncome(userId, [{ category: 'Salario', amount: 0 }]);
+  const { count } = await supabase
+    .from('categories')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_id', userId);
+
+  if (count === 0) {
+    for (let i = 0; i < defaultCategories.length; i++) {
+      await supabase.from('categories').insert({
+        user_id: userId,
+        name: defaultCategories[i].name,
+        type: defaultCategories[i].type,
+        essential: defaultCategories[i].essential,
+        group: defaultCategories[i].group,
+        budget: defaultCategories[i].budget || 0,
+        sort_order: i,
+      });
+    }
+    await supabase.from('budget_income').insert({
+      user_id: userId,
+      category: 'Salario',
+      amount: 0,
+    });
     await upsertSettings(userId, 0);
   }
 }
